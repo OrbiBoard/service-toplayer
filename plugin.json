@@ -1,0 +1,15 @@
+{
+  "id": "service.toplayer",
+  "name": "Service TopLayer",
+  "version": "1.0.0",
+  "main": "index.js",
+  "permissions": ["all"],
+  "description": "Provides a top-layer overlay service with UIAccess-like behavior.",
+  "components": [
+    {
+      "name": "TopLayer Overlay",
+      "type": "overlay",
+      "entry": "index.html"
+    }
+  ]
+}

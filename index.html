@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Service TopLayer</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: transparent;
+            /* Allow pointer events to pass through by default */
+            pointer-events: none; 
+        }
+
+        #compass-container {
+            position: absolute;
+            top: 100px;
+            right: 100px;
+            width: 60px;
+            height: 60px;
+            /* Enable pointer events for the widget */
+            pointer-events: auto; 
+            z-index: 9999;
+            cursor: pointer;
+            transition: transform 0.1s;
+        }
+
+        .compass-btn {
+            width: 100%;
+            height: 100%;
+            border-radius: 50%;
+            background: rgba(0, 0, 0, 0.7);
+            border: 2px solid #00ffcc;
+            box-shadow: 0 0 10px #00ffcc;
+            color: #fff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            user-select: none;
+        }
+
+        .compass-btn:hover {
+            background: rgba(0, 0, 0, 0.9);
+            transform: scale(1.05);
+        }
+        
+        /* Visual feedback for dragging */
+        .dragging .compass-btn {
+            border-color: #ff00cc;
+            box-shadow: 0 0 15px #ff00cc;
+            cursor: grabbing;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="compass-container">
+        <div class="compass-btn">N</div>
+    </div>
+
+    <script src="renderer.js"></script>
+</body>
+</html>
