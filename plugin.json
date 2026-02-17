@@ -1,15 +1,10 @@
 {
-  "id": "service.toplayer",
-  "name": "Service TopLayer",
-  "version": "1.0.0",
+  "id": "service-toplayer",
+  "name": "服务.置顶层级",
+  "version": "1.0.2",
+  "type": "service",
+  "icon": "ri-stack-line",
+  "description": "提供全局置顶的覆盖层容器，支持点击穿透与组件挂载。",
   "main": "index.js",
-  "permissions": ["all"],
-  "description": "Provides a top-layer overlay service with UIAccess-like behavior.",
-  "components": [
-    {
-      "name": "TopLayer Overlay",
-      "type": "overlay",
-      "entry": "index.html"
-    }
-  ]
+  "enabled": true
 }
