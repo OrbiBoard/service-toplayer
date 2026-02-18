@@ -185,7 +185,11 @@ const functions = {
         // Temporarily enable mouse events for the whole window to capture drag
         overlayWindow.setIgnoreMouseEvents(false);
         overlayWindow.setShape([{ x: 0, y: 0, width: 99999, height: 99999 }]); // Full screen
-        overlayWindow.webContents.send(CHANNELS.START_DRAG, id);
+        
+        // Get initial mouse position to avoid jump
+        const pt = screen.getCursorScreenPoint ? screen.getCursorScreenPoint() : { x: 0, y: 0 };
+        
+        overlayWindow.webContents.send(CHANNELS.START_DRAG, { id, startX: pt.x, startY: pt.y });
         return true;
     },
 

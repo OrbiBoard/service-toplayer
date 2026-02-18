@@ -155,40 +155,20 @@ ipcRenderer.on(CHANNELS.ADD, (_, options) => renderWidget(options));
 ipcRenderer.on(CHANNELS.REMOVE, (_, id) => removeWidget(id));
 ipcRenderer.on(CHANNELS.UPDATE, (_, payload) => updateWidgetBounds(payload.id, payload));
 
-ipcRenderer.on(CHANNELS.START_DRAG, (_, id) => {
+ipcRenderer.on(CHANNELS.START_DRAG, (_, payload) => {
+    // Support both old format (id string) and new format ({id, startX, startY})
+    const id = (typeof payload === 'string') ? payload : payload.id;
+    const initialX = (typeof payload === 'object') ? payload.startX : null;
+    const initialY = (typeof payload === 'object') ? payload.startY : null;
+    
     const widget = widgets.get(id);
     if (!widget) return;
 
     isDragging = true;
-    const startX = widget.bounds.x;
-    const startY = widget.bounds.y;
-    // We don't have mouse event here, so we assume drag starts from current mouse position?
-    // Wait, we need the initial mouse position to calculate offset.
-    // But START_DRAG is triggered by IPC, which doesn't carry mouse info unless passed.
-    // However, if we use screen.getCursorScreenPoint() in main process and pass it down?
-    // Or we can just use movementX/Y from mousemove event?
-    // But movementX/Y requires pointer lock or continuous events.
     
-    // Better approach: 
-    // The user clicks on the widget (webview). The webview sends 'mousedown' to plugin main process.
-    // Plugin main process calls 'startDrag'.
-    // At this point, the mouse is still down.
-    // We add 'mousemove' listener to document.
-    
-    // We need the initial mouse position relative to the widget to keep it under cursor.
-    // But we don't have it easily.
-    // Let's assume we drag from the center or just use delta.
-    
-    // Actually, if we use `movementX` and `movementY` from `mousemove` event, we can apply delta.
-    // But `movementX` is not always reliable.
-    
-    // Let's try to get initial mouse position.
-    // Since we are in renderer, we can't easily get global mouse pos without an event.
-    // But the `mousemove` event will provide `screenX`/`screenY`.
-    // The first `mousemove` will give us a position.
-    
-    let lastScreenX = null;
-    let lastScreenY = null;
+    // If we have initial mouse position, use it
+    let lastScreenX = initialX;
+    let lastScreenY = initialY;
     
     const onMove = (e) => {
         if (lastScreenX === null) {
