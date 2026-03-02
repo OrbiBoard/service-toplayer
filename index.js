@@ -6,6 +6,7 @@ let overlayWindow = null;
 const widgets = new Map();
 let isRendererReady = false;
 const pendingWidgets = [];
+let isDragging = false;
 
 // IPC Channels
 const CHANNELS = {
@@ -27,7 +28,12 @@ let pluginApi = null;
  * Handle shape updates from renderer to enable click-through
  */
 const onSetShape = (event, payload) => {
-    // Security verification
+    console.log('[Service.TopLayer] onSetShape called, isDragging:', isDragging);
+    if (isDragging) {
+        console.log('[Service.TopLayer] BLOCKED shape update during drag');
+        return;
+    }
+    
     const senderWin = BrowserWindow.fromWebContents(event.sender);
     if (!senderWin || (overlayWindow && senderWin.id !== overlayWindow.id)) return;
     if (!overlayWindow || overlayWindow.isDestroyed()) return;
@@ -180,16 +186,46 @@ const functions = {
         return true;
     },
 
-    startDrag: (id) => {
+    startDrag: (arg1, arg2) => {
+        let id, options;
+        if (typeof arg1 === 'object' && arg1 !== null) {
+             id = arg1.id;
+             options = arg1;
+        } else {
+             id = arg1;
+             options = arg2 || {};
+        }
+
         if (!overlayWindow || !widgets.has(id)) return false;
-        // Temporarily enable mouse events for the whole window to capture drag
-        overlayWindow.setIgnoreMouseEvents(false);
-        overlayWindow.setShape([{ x: 0, y: 0, width: 99999, height: 99999 }]); // Full screen
         
-        // Get initial mouse position to avoid jump
+        console.log('[Service.TopLayer] startDrag called for:', id);
+        isDragging = true;
+        console.log('[Service.TopLayer] isDragging set to true');
+        
+        try {
+            console.log('[Service.TopLayer] Setting full screen shape');
+            overlayWindow.setShape([{ x: 0, y: 0, width: 99999, height: 99999 }]);
+            overlayWindow.setIgnoreMouseEvents(false);
+            console.log('[Service.TopLayer] Full screen shape set successfully');
+        } catch (e) {
+            console.error('[Service.TopLayer] Failed to set drag shape', e);
+        }
+        
         const pt = screen.getCursorScreenPoint ? screen.getCursorScreenPoint() : { x: 0, y: 0 };
         
-        overlayWindow.webContents.send(CHANNELS.START_DRAG, { id, startX: pt.x, startY: pt.y });
+        overlayWindow.webContents.send(CHANNELS.START_DRAG, { 
+            id, 
+            startX: pt.x, 
+            startY: pt.y,
+            lockX: !!options.lockX,
+            lockY: !!options.lockY
+        });
+        return true;
+    },
+
+    stopDrag: () => {
+        if (!overlayWindow) return false;
+        overlayWindow.webContents.send('service.toplayer:stop-drag');
         return true;
     },
 
@@ -214,15 +250,26 @@ function init(api) {
     // Handle Drag End
     ipcMain.removeAllListeners(CHANNELS.DRAG_END);
     ipcMain.on(CHANNELS.DRAG_END, (event, payload) => {
+        isDragging = false;
+        
         const { id, x, y } = payload;
+        
         if (widgets.has(id)) {
             const w = widgets.get(id);
             widgets.set(id, { ...w, x, y });
             
-            // Notify plugin via event
             if (pluginApi) {
                 pluginApi.emit('widget.drag.end', { id, x, y });
             }
+        }
+    });
+
+    // Handle Drag Move (Real-time)
+    ipcMain.removeAllListeners('service.toplayer:drag-move');
+    ipcMain.on('service.toplayer:drag-move', (event, payload) => {
+        const { id, x, y } = payload;
+        if (pluginApi) {
+            pluginApi.emit('widget.drag.move', { id, x, y });
         }
     });
 

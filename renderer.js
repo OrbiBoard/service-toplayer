@@ -14,16 +14,23 @@ const CHANNELS = {
 const widgets = new Map();
 const container = document.getElementById('widget-container');
 let shapeUpdateTimer = null;
-let isDragging = false; // Flag to prevent shape updates during drag
+let isDragging = false;
+let dragWidgetId = null;
 
 /**
  * Calculate and send the window shape (clickable areas) to the main process
  */
 function updateWindowShape() {
-    if (isDragging) return; // Skip during drag
+    console.log('[Renderer] updateWindowShape called, isDragging:', isDragging);
+    if (isDragging) {
+        console.log('[Renderer] BLOCKED shape update during drag');
+        return;
+    }
     if (shapeUpdateTimer) clearTimeout(shapeUpdateTimer);
 
     shapeUpdateTimer = setTimeout(() => {
+        if (isDragging) return; // Double check
+
         // Check if any widget requests pass-through
         let passThroughMode = false;
         for (const [id, widget] of widgets) {
@@ -117,7 +124,7 @@ function removeWidget(id) {
     }
 }
 
-function updateWidgetBounds(id, bounds) {
+function updateWidgetBounds(id, bounds, skipShapeUpdate = false) {
     const widget = widgets.get(id);
     if (!widget) return;
 
@@ -141,13 +148,9 @@ function updateWidgetBounds(id, bounds) {
         element.style.height = `${height}px`;
     }
 
-    // Update bounds in state
-    if (width !== undefined) widget.bounds.width = width;
-    if (height !== undefined) widget.bounds.height = height;
-    if (x !== undefined) widget.bounds.x = x;
-    if (y !== undefined) widget.bounds.y = y;
-
-    updateWindowShape();
+    if (!skipShapeUpdate && !isDragging) {
+        updateWindowShape();
+    }
 }
 
 // IPC Listeners
@@ -156,53 +159,102 @@ ipcRenderer.on(CHANNELS.REMOVE, (_, id) => removeWidget(id));
 ipcRenderer.on(CHANNELS.UPDATE, (_, payload) => updateWidgetBounds(payload.id, payload));
 
 ipcRenderer.on(CHANNELS.START_DRAG, (_, payload) => {
-    // Support both old format (id string) and new format ({id, startX, startY})
+    console.log('[Renderer] START_DRAG received:', payload);
     const id = (typeof payload === 'string') ? payload : payload.id;
     const initialX = (typeof payload === 'object') ? payload.startX : null;
     const initialY = (typeof payload === 'object') ? payload.startY : null;
+    const lockX = (typeof payload === 'object') ? payload.lockX : false;
+    const lockY = (typeof payload === 'object') ? payload.lockY : false;
     
     const widget = widgets.get(id);
-    if (!widget) return;
+    if (!widget) {
+        console.log('[Renderer] Widget not found:', id);
+        return;
+    }
 
+    console.log('[Renderer] Setting isDragging = true');
     isDragging = true;
+    dragWidgetId = id;
     
-    // If we have initial mouse position, use it
-    let lastScreenX = initialX;
-    let lastScreenY = initialY;
+    if (shapeUpdateTimer) {
+        clearTimeout(shapeUpdateTimer);
+        shapeUpdateTimer = null;
+    }
     
-    const onMove = (e) => {
-        if (lastScreenX === null) {
-            lastScreenX = e.screenX;
-            lastScreenY = e.screenY;
-            return;
-        }
+    const startScreenX = initialX;
+    const startScreenY = initialY;
+    
+    const initialWidgetX = widget.bounds.x;
+    const initialWidgetY = widget.bounds.y;
+    const widgetWidth = widget.bounds.width;
+    const widgetHeight = widget.bounds.height;
+
+    const clampToBounds = (newX, newY) => {
+        const minX = 0;
+        const minY = 0;
+        const maxX = window.innerWidth - widgetWidth;
+        const maxY = window.innerHeight - widgetHeight;
         
-        const dx = e.screenX - lastScreenX;
-        const dy = e.screenY - lastScreenY;
-        
-        lastScreenX = e.screenX;
-        lastScreenY = e.screenY;
-        
-        const newX = widget.bounds.x + dx;
-        const newY = widget.bounds.y + dy;
-        
-        updateWidgetBounds(id, { x: newX, y: newY });
+        return {
+            x: Math.max(minX, Math.min(maxX, newX)),
+            y: Math.max(minY, Math.min(maxY, newY))
+        };
     };
-    
-    const onUp = () => {
-        isDragging = false;
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
+
+    const handleMove = (screenX, screenY) => {
+        if (startScreenX === null || startScreenY === null) return;
         
-        // Resume shape updates and update final shape
+        const totalDx = screenX - startScreenX;
+        const totalDy = screenY - startScreenY;
+        
+        let newX = initialWidgetX;
+        let newY = initialWidgetY;
+
+        if (!lockX) newX += totalDx;
+        if (!lockY) newY += totalDy;
+        
+        const clamped = clampToBounds(newX, newY);
+        
+        updateWidgetBounds(id, { x: clamped.x, y: clamped.y }, true);
+        
+        ipcRenderer.send('service.toplayer:drag-move', { id, x: clamped.x, y: clamped.y });
+    };
+
+    const onMouseMove = (e) => handleMove(e.screenX, e.screenY);
+    
+    const onTouchMove = (e) => {
+        if (e.touches.length === 1) {
+            const touch = e.touches[0];
+            handleMove(touch.screenX, touch.screenY);
+            e.preventDefault();
+        }
+    };
+
+    const endDrag = () => {
+        if (!isDragging) return; 
+        isDragging = false;
+        dragWidgetId = null;
+        
+        document.removeEventListener('mousemove', onMouseMove);
+        document.removeEventListener('mouseup', endDrag);
+        document.removeEventListener('touchmove', onTouchMove);
+        document.removeEventListener('touchend', endDrag);
+        document.removeEventListener('touchcancel', endDrag);
+        window.removeEventListener('blur', endDrag);
+        
         updateWindowShape();
         
-        // Notify main process about drag end and final position
         ipcRenderer.send(CHANNELS.DRAG_END, { id, x: widget.bounds.x, y: widget.bounds.y });
     };
+
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', endDrag);
+    document.addEventListener('touchmove', onTouchMove, { passive: false });
+    document.addEventListener('touchend', endDrag);
+    document.addEventListener('touchcancel', endDrag);
+    window.addEventListener('blur', endDrag);
     
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
+    ipcRenderer.once('service.toplayer:stop-drag', endDrag);
 });
 
 // Notify main process that renderer is ready
