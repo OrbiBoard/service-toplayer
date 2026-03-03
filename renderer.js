@@ -16,6 +16,7 @@ const container = document.getElementById('widget-container');
 let shapeUpdateTimer = null;
 let isDragging = false;
 let dragWidgetId = null;
+let currentDragListeners = null;
 
 /**
  * Calculate and send the window shape (clickable areas) to the main process
@@ -172,6 +173,17 @@ ipcRenderer.on(CHANNELS.START_DRAG, (_, payload) => {
         return;
     }
 
+    if (isDragging && currentDragListeners) {
+        console.log('[Renderer] Cleaning up previous drag session');
+        document.removeEventListener('mousemove', currentDragListeners.onMouseMove);
+        document.removeEventListener('mouseup', currentDragListeners.endDrag);
+        document.removeEventListener('touchmove', currentDragListeners.onTouchMove);
+        document.removeEventListener('touchend', currentDragListeners.endDrag);
+        document.removeEventListener('touchcancel', currentDragListeners.endDrag);
+        window.removeEventListener('blur', currentDragListeners.endDrag);
+        currentDragListeners = null;
+    }
+
     console.log('[Renderer] Setting isDragging = true');
     isDragging = true;
     dragWidgetId = id;
@@ -234,6 +246,7 @@ ipcRenderer.on(CHANNELS.START_DRAG, (_, payload) => {
         if (!isDragging) return; 
         isDragging = false;
         dragWidgetId = null;
+        currentDragListeners = null;
         
         document.removeEventListener('mousemove', onMouseMove);
         document.removeEventListener('mouseup', endDrag);
@@ -246,6 +259,8 @@ ipcRenderer.on(CHANNELS.START_DRAG, (_, payload) => {
         
         ipcRenderer.send(CHANNELS.DRAG_END, { id, x: widget.bounds.x, y: widget.bounds.y });
     };
+
+    currentDragListeners = { onMouseMove, endDrag, onTouchMove };
 
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', endDrag);

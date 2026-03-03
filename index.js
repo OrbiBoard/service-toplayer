@@ -211,20 +211,95 @@ const functions = {
             console.error('[Service.TopLayer] Failed to set drag shape', e);
         }
         
-        const pt = screen.getCursorScreenPoint ? screen.getCursorScreenPoint() : { x: 0, y: 0 };
+        return true;
+    },
+
+    endDrag: (arg1, arg2) => {
+        let id, x, y;
+        if (typeof arg1 === 'object' && arg1 !== null) {
+            id = arg1.id;
+            x = arg1.x;
+            y = arg1.y;
+        } else {
+            id = arg1;
+            x = arg2?.x;
+            y = arg2?.y;
+        }
+
+        console.log('[Service.TopLayer] endDrag called for:', id);
+        isDragging = false;
         
-        overlayWindow.webContents.send(CHANNELS.START_DRAG, { 
-            id, 
-            startX: pt.x, 
-            startY: pt.y,
-            lockX: !!options.lockX,
-            lockY: !!options.lockY
-        });
+        if (widgets.has(id)) {
+            const w = widgets.get(id);
+            if (x !== undefined && y !== undefined) {
+                widgets.set(id, { ...w, x, y });
+            }
+        }
+        
+        if (overlayWindow && !overlayWindow.isDestroyed()) {
+            console.log('[Service.TopLayer] Restoring shape after drag');
+            const rects = [];
+            for (const [widgetId, widget] of widgets) {
+                const bounds = widget;
+                if (bounds.width > 0 && bounds.height > 0) {
+                    rects.push({
+                        x: Math.round(bounds.x || 0),
+                        y: Math.round(bounds.y || 0),
+                        width: Math.round(bounds.width),
+                        height: Math.round(bounds.height)
+                    });
+                }
+            }
+            try {
+                if (rects.length === 0) {
+                    overlayWindow.setIgnoreMouseEvents(true, { forward: true });
+                    overlayWindow.setShape([]);
+                } else {
+                    overlayWindow.setShape(rects);
+                    overlayWindow.setIgnoreMouseEvents(false);
+                }
+            } catch (e) {
+                console.error('[Service.TopLayer] Failed to restore shape after drag', e);
+            }
+        }
+        
+        if (pluginApi) {
+            pluginApi.emit('widget.drag.end', { id, x, y });
+        }
+        
         return true;
     },
 
     stopDrag: () => {
         if (!overlayWindow) return false;
+        isDragging = false;
+        
+        if (overlayWindow && !overlayWindow.isDestroyed()) {
+            const rects = [];
+            for (const [widgetId, widget] of widgets) {
+                const bounds = widget;
+                if (bounds.width > 0 && bounds.height > 0) {
+                    rects.push({
+                        x: Math.round(bounds.x || 0),
+                        y: Math.round(bounds.y || 0),
+                        width: Math.round(bounds.width),
+                        height: Math.round(bounds.height)
+                    });
+                }
+            }
+            try {
+                if (rects.length === 0) {
+                    overlayWindow.setIgnoreMouseEvents(true, { forward: true });
+                    overlayWindow.setShape([]);
+                } else {
+                    overlayWindow.setShape(rects);
+                    overlayWindow.setIgnoreMouseEvents(false);
+                }
+            } catch (e) {
+                console.error('[Service.TopLayer] Failed to restore shape after stopDrag', e);
+            }
+        }
+        
         overlayWindow.webContents.send('service.toplayer:stop-drag');
         return true;
     },
@@ -250,6 +325,7 @@ function init(api) {
     // Handle Drag End
     ipcMain.removeAllListeners(CHANNELS.DRAG_END);
     ipcMain.on(CHANNELS.DRAG_END, (event, payload) => {
+        const wasDragging = isDragging;
         isDragging = false;
         
         const { id, x, y } = payload;
@@ -260,6 +336,33 @@ function init(api) {
             
             if (pluginApi) {
                 pluginApi.emit('widget.drag.end', { id, x, y });
+            }
+        }
+
+        if (wasDragging && overlayWindow && !overlayWindow.isDestroyed()) {
+            console.log('[Service.TopLayer] Drag ended, triggering shape update');
+            const rects = [];
+            for (const [widgetId, widget] of widgets) {
+                const bounds = widget;
+                if (bounds.width > 0 && bounds.height > 0) {
+                    rects.push({
+                        x: Math.round(bounds.x || 0),
+                        y: Math.round(bounds.y || 0),
+                        width: Math.round(bounds.width),
+                        height: Math.round(bounds.height)
+                    });
+                }
+            }
+            try {
+                if (rects.length === 0) {
+                    overlayWindow.setIgnoreMouseEvents(true, { forward: true });
+                    overlayWindow.setShape([]);
+                } else {
+                    overlayWindow.setShape(rects);
+                    overlayWindow.setIgnoreMouseEvents(false);
+                }
+            } catch (e) {
+                console.error('[Service.TopLayer] Failed to restore shape after drag', e);
             }
         }
     });
