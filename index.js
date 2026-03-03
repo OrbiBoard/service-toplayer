@@ -15,7 +15,9 @@ const CHANNELS = {
     UPDATE: 'service.toplayer:update-widget',
     SET_SHAPE: 'service.toplayer:set-window-shape',
     START_DRAG: 'service.toplayer:start-drag',
-    DRAG_END: 'service.toplayer:drag-end'
+    DRAG_END: 'service.toplayer:drag-end',
+    SHOW_OVERLAY: 'service.toplayer:show-overlay',
+    HIDE_OVERLAY: 'service.toplayer:hide-overlay'
 };
 
 // Fix channel names to match renderer (using hyphen instead of dot for consistency if needed, but keeping dot for compatibility with existing calls)
@@ -307,10 +309,29 @@ const functions = {
     show: () => overlayWindow?.show(),
     hide: () => overlayWindow?.hide(),
     
+    showOverlay: (hint) => {
+        if (!overlayWindow || overlayWindow.isDestroyed()) return false;
+        overlayWindow.webContents.send(CHANNELS.SHOW_OVERLAY, hint);
+        return true;
+    },
+    
+    hideOverlay: () => {
+        if (!overlayWindow || overlayWindow.isDestroyed()) return false;
+        overlayWindow.webContents.send(CHANNELS.HIDE_OVERLAY);
+        return true;
+    },
+    
     // Debug helper
     getWidgetCount: () => widgets.size,
     
-    getWidget: (id) => widgets.get(id) || null,
+    getWidget: (id) => {
+        if (!widgets.has(id)) return null;
+        const w = widgets.get(id);
+        return {
+            id: w.id,
+            bounds: { x: w.x, y: w.y, width: w.width, height: w.height }
+        };
+    },
 
     // Check status
     isRunning: () => !!overlayWindow && !overlayWindow.isDestroyed()
@@ -373,6 +394,50 @@ function init(api) {
         const { id, x, y } = payload;
         if (pluginApi) {
             pluginApi.emit('widget.drag.move', { id, x, y });
+        }
+    });
+
+    // Handle Overlay Clicked (cancel drag)
+    ipcMain.removeAllListeners('service.toplayer:overlay-clicked');
+    ipcMain.on('service.toplayer:overlay-clicked', () => {
+        console.log('[Service.TopLayer] Overlay clicked, cancelling drag');
+        
+        // Hide overlay
+        functions.hideOverlay();
+        
+        // Reset drag state
+        isDragging = false;
+        
+        // Restore shape
+        if (overlayWindow && !overlayWindow.isDestroyed()) {
+            const rects = [];
+            for (const [widgetId, widget] of widgets) {
+                const bounds = widget;
+                if (bounds.width > 0 && bounds.height > 0) {
+                    rects.push({
+                        x: Math.round(bounds.x || 0),
+                        y: Math.round(bounds.y || 0),
+                        width: Math.round(bounds.width),
+                        height: Math.round(bounds.height)
+                    });
+                }
+            }
+            try {
+                if (rects.length === 0) {
+                    overlayWindow.setIgnoreMouseEvents(true, { forward: true });
+                    overlayWindow.setShape([]);
+                } else {
+                    overlayWindow.setShape(rects);
+                    overlayWindow.setIgnoreMouseEvents(false);
+                }
+            } catch (e) {
+                console.error('[Service.TopLayer] Failed to restore shape after overlay click', e);
+            }
+        }
+        
+        // Emit cancel event
+        if (pluginApi) {
+            pluginApi.emit('widget.drag.cancel', {});
         }
     });
 

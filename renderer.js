@@ -7,16 +7,59 @@ const CHANNELS = {
     UPDATE: 'service.toplayer:update-widget',
     SET_SHAPE: 'service.toplayer:set-window-shape',
     START_DRAG: 'service.toplayer:start-drag',
-    DRAG_END: 'service.toplayer:drag-end'
+    DRAG_END: 'service.toplayer:drag-end',
+    SHOW_OVERLAY: 'service.toplayer:show-overlay',
+    HIDE_OVERLAY: 'service.toplayer:hide-overlay'
 };
 
 // State
 const widgets = new Map();
 const container = document.getElementById('widget-container');
+const dragOverlay = document.getElementById('drag-overlay');
 let shapeUpdateTimer = null;
 let isDragging = false;
 let dragWidgetId = null;
 let currentDragListeners = null;
+let overlayClickCallback = null;
+
+/**
+ * Show drag overlay with dim effect
+ */
+function showDragOverlay(hint = '点击空白区域取消拖动') {
+    if (!dragOverlay) return;
+    dragOverlay.setAttribute('data-hint', hint);
+    dragOverlay.classList.add('active');
+    
+    // Add click handler to cancel drag
+    if (overlayClickCallback) {
+        dragOverlay.removeEventListener('click', overlayClickCallback);
+    }
+    
+    overlayClickCallback = (e) => {
+        // Cancel the drag - try local listeners first, then notify main process
+        if (isDragging && currentDragListeners) {
+            currentDragListeners.endDrag();
+        } else {
+            // For external drag (like sidebar), notify main process to cancel
+            ipcRenderer.send('service.toplayer:overlay-clicked');
+        }
+    };
+    
+    dragOverlay.addEventListener('click', overlayClickCallback);
+}
+
+/**
+ * Hide drag overlay
+ */
+function hideDragOverlay() {
+    if (!dragOverlay) return;
+    dragOverlay.classList.remove('active');
+    
+    if (overlayClickCallback) {
+        dragOverlay.removeEventListener('click', overlayClickCallback);
+        overlayClickCallback = null;
+    }
+}
 
 /**
  * Calculate and send the window shape (clickable areas) to the main process
@@ -248,6 +291,9 @@ ipcRenderer.on(CHANNELS.START_DRAG, (_, payload) => {
         dragWidgetId = null;
         currentDragListeners = null;
         
+        // Hide overlay
+        hideDragOverlay();
+        
         document.removeEventListener('mousemove', onMouseMove);
         document.removeEventListener('mouseup', endDrag);
         document.removeEventListener('touchmove', onTouchMove);
@@ -261,6 +307,9 @@ ipcRenderer.on(CHANNELS.START_DRAG, (_, payload) => {
     };
 
     currentDragListeners = { onMouseMove, endDrag, onTouchMove };
+    
+    // Show overlay
+    showDragOverlay();
 
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', endDrag);
@@ -271,6 +320,10 @@ ipcRenderer.on(CHANNELS.START_DRAG, (_, payload) => {
     
     ipcRenderer.once('service.toplayer:stop-drag', endDrag);
 });
+
+// Overlay control IPC
+ipcRenderer.on(CHANNELS.SHOW_OVERLAY, (_, hint) => showDragOverlay(hint));
+ipcRenderer.on(CHANNELS.HIDE_OVERLAY, () => hideDragOverlay());
 
 // Notify main process that renderer is ready
 ipcRenderer.send('service.toplayer:renderer-ready');
