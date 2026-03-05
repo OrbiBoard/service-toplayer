@@ -30,11 +30,12 @@ function showDragOverlay(hint = '点击空白区域取消拖动') {
     dragOverlay.setAttribute('data-hint', hint);
     dragOverlay.classList.add('active');
     
-    // Add click handler to cancel drag
+    // Remove previous listeners
     if (overlayClickCallback) {
         dragOverlay.removeEventListener('click', overlayClickCallback);
     }
     
+    // Click callback for mouse - touch is handled by the drag listeners
     overlayClickCallback = (e) => {
         // Cancel the drag - try local listeners first, then notify main process
         if (isDragging && currentDragListeners) {
@@ -45,6 +46,7 @@ function showDragOverlay(hint = '点击空白区域取消拖动') {
         }
     };
     
+    // Only listen for click (mouse) - touch events are handled by drag listeners
     dragOverlay.addEventListener('click', overlayClickCallback);
 }
 
@@ -205,8 +207,7 @@ ipcRenderer.on(CHANNELS.UPDATE, (_, payload) => updateWidgetBounds(payload.id, p
 ipcRenderer.on(CHANNELS.START_DRAG, (_, payload) => {
     console.log('[Renderer] START_DRAG received:', payload);
     const id = (typeof payload === 'string') ? payload : payload.id;
-    const initialX = (typeof payload === 'object') ? payload.startX : null;
-    const initialY = (typeof payload === 'object') ? payload.startY : null;
+    const isTouch = (typeof payload === 'object') ? payload.isTouch : false;
     const lockX = (typeof payload === 'object') ? payload.lockX : false;
     const lockY = (typeof payload === 'object') ? payload.lockY : false;
     
@@ -218,16 +219,11 @@ ipcRenderer.on(CHANNELS.START_DRAG, (_, payload) => {
 
     if (isDragging && currentDragListeners) {
         console.log('[Renderer] Cleaning up previous drag session');
-        document.removeEventListener('mousemove', currentDragListeners.onMouseMove);
-        document.removeEventListener('mouseup', currentDragListeners.endDrag);
-        document.removeEventListener('touchmove', currentDragListeners.onTouchMove);
-        document.removeEventListener('touchend', currentDragListeners.endDrag);
-        document.removeEventListener('touchcancel', currentDragListeners.endDrag);
-        window.removeEventListener('blur', currentDragListeners.endDrag);
+        cleanupDragListeners(currentDragListeners);
         currentDragListeners = null;
     }
 
-    console.log('[Renderer] Setting isDragging = true');
+    console.log('[Renderer] Setting isDragging = true, isTouch:', isTouch);
     isDragging = true;
     dragWidgetId = id;
     
@@ -235,9 +231,6 @@ ipcRenderer.on(CHANNELS.START_DRAG, (_, payload) => {
         clearTimeout(shapeUpdateTimer);
         shapeUpdateTimer = null;
     }
-    
-    const startScreenX = initialX;
-    const startScreenY = initialY;
     
     const initialWidgetX = widget.bounds.x;
     const initialWidgetY = widget.bounds.y;
@@ -256,74 +249,179 @@ ipcRenderer.on(CHANNELS.START_DRAG, (_, payload) => {
         };
     };
 
-    const handleMove = (screenX, screenY) => {
-        if (startScreenX === null || startScreenY === null) return;
+    // Show hint near widget for touch mode
+    const showTouchHint = () => {
+        const hint = document.createElement('div');
+        hint.id = 'touch-drag-hint';
+        hint.className = 'touch-drag-hint';
+        hint.textContent = '请选择拖动目标位置';
         
-        const totalDx = screenX - startScreenX;
-        const totalDy = screenY - startScreenY;
+        // Position hint near the widget, but ensure it stays on screen
+        let hintX = initialWidgetX + widgetWidth / 2;
+        let hintY = initialWidgetY - 50;
         
-        let newX = initialWidgetX;
-        let newY = initialWidgetY;
-
-        if (!lockX) newX += totalDx;
-        if (!lockY) newY += totalDy;
+        // Ensure hint doesn't go off screen
+        const hintWidth = 200; // Approximate width
+        const hintHeight = 40; // Approximate height
         
-        const clamped = clampToBounds(newX, newY);
+        if (hintX - hintWidth / 2 < 10) hintX = hintWidth / 2 + 10;
+        if (hintX + hintWidth / 2 > window.innerWidth - 10) hintX = window.innerWidth - hintWidth / 2 - 10;
+        if (hintY < 10) hintY = initialWidgetY + widgetHeight + 50;
+        if (hintY + hintHeight > window.innerHeight - 10) hintY = window.innerHeight - hintHeight - 10;
         
-        updateWidgetBounds(id, { x: clamped.x, y: clamped.y }, true);
+        hint.style.left = `${hintX}px`;
+        hint.style.top = `${hintY}px`;
         
-        ipcRenderer.send('service.toplayer:drag-move', { id, x: clamped.x, y: clamped.y });
+        document.body.appendChild(hint);
     };
 
-    const onMouseMove = (e) => handleMove(e.screenX, e.screenY);
-    
-    const onTouchMove = (e) => {
-        if (e.touches.length === 1) {
-            const touch = e.touches[0];
-            handleMove(touch.screenX, touch.screenY);
-            e.preventDefault();
-        }
+    const hideTouchHint = () => {
+        const hint = document.getElementById('touch-drag-hint');
+        if (hint) hint.remove();
     };
 
-    const endDrag = () => {
-        if (!isDragging) return; 
-        isDragging = false;
-        dragWidgetId = null;
-        currentDragListeners = null;
-        
-        // Hide overlay
-        hideDragOverlay();
-        
-        document.removeEventListener('mousemove', onMouseMove);
-        document.removeEventListener('mouseup', endDrag);
-        document.removeEventListener('touchmove', onTouchMove);
-        document.removeEventListener('touchend', endDrag);
-        document.removeEventListener('touchcancel', endDrag);
-        window.removeEventListener('blur', endDrag);
-        
-        updateWindowShape();
-        
-        ipcRenderer.send(CHANNELS.DRAG_END, { id, x: widget.bounds.x, y: widget.bounds.y });
-    };
+    // Touch mode: click to select target position
+    if (isTouch) {
+        const onTargetClick = (e) => {
+            // Get click position
+            let clientX, clientY;
+            if (e.type === 'touchend') {
+                if (e.changedTouches && e.changedTouches.length > 0) {
+                    clientX = e.changedTouches[0].clientX;
+                    clientY = e.changedTouches[0].clientY;
+                } else {
+                    return;
+                }
+            } else {
+                clientX = e.clientX;
+                clientY = e.clientY;
+            }
+            
+            // Calculate new position (center widget on click position)
+            let newX = clientX - widgetWidth / 2;
+            let newY = clientY - widgetHeight / 2;
+            
+            const clamped = clampToBounds(newX, newY);
+            
+            // Update widget position
+            updateWidgetBounds(id, { x: clamped.x, y: clamped.y }, true);
+            ipcRenderer.send('service.toplayer:drag-move', { id, x: clamped.x, y: clamped.y });
+            
+            // End drag
+            endDrag();
+        };
 
-    currentDragListeners = { onMouseMove, endDrag, onTouchMove };
-    
-    // Show overlay
-    showDragOverlay();
+        const endDrag = () => {
+            if (!isDragging) return; 
+            isDragging = false;
+            dragWidgetId = null;
+            currentDragListeners = null;
+            
+            hideTouchHint();
+            hideDragOverlay();
+            
+            dragOverlay.removeEventListener('click', onTargetClick);
+            dragOverlay.removeEventListener('touchend', onTargetClick);
+            window.removeEventListener('blur', endDrag);
+            
+            updateWindowShape();
+            
+            ipcRenderer.send(CHANNELS.DRAG_END, { id, x: widget.bounds.x, y: widget.bounds.y });
+        };
 
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', endDrag);
-    document.addEventListener('touchmove', onTouchMove, { passive: false });
-    document.addEventListener('touchend', endDrag);
-    document.addEventListener('touchcancel', endDrag);
-    window.addEventListener('blur', endDrag);
-    
-    ipcRenderer.once('service.toplayer:stop-drag', endDrag);
+        currentDragListeners = { onTargetClick, endDrag };
+        
+        showDragOverlay('点击屏幕选择目标位置');
+        showTouchHint();
+
+        dragOverlay.addEventListener('click', onTargetClick);
+        dragOverlay.addEventListener('touchend', onTargetClick);
+        window.addEventListener('blur', endDrag);
+        
+        ipcRenderer.once('service.toplayer:stop-drag', endDrag);
+    } 
+    // Mouse mode: continuous drag
+    else {
+        const widgetCenterX = initialWidgetX + widgetWidth / 2;
+        const widgetCenterY = initialWidgetY + widgetHeight / 2;
+        let pointerOffsetX = null;
+        let pointerOffsetY = null;
+
+        const handleMove = (clientX, clientY) => {
+            if (pointerOffsetX === null || pointerOffsetY === null) {
+                pointerOffsetX = clientX - widgetCenterX;
+                pointerOffsetY = clientY - widgetCenterY;
+                return;
+            }
+            
+            let newCenterX = clientX - pointerOffsetX;
+            let newCenterY = clientY - pointerOffsetY;
+            
+            let newX = newCenterX - widgetWidth / 2;
+            let newY = newCenterY - widgetHeight / 2;
+            
+            if (lockX) newX = initialWidgetX;
+            if (lockY) newY = initialWidgetY;
+            
+            const clamped = clampToBounds(newX, newY);
+            
+            updateWidgetBounds(id, { x: clamped.x, y: clamped.y }, true);
+            ipcRenderer.send('service.toplayer:drag-move', { id, x: clamped.x, y: clamped.y });
+        };
+
+        const onMouseMove = (e) => handleMove(e.clientX, e.clientY);
+        
+        const endDrag = () => {
+            if (!isDragging) return; 
+            isDragging = false;
+            dragWidgetId = null;
+            currentDragListeners = null;
+            
+            hideDragOverlay();
+            
+            dragOverlay.removeEventListener('mousemove', onMouseMove);
+            dragOverlay.removeEventListener('mouseup', endDrag);
+            window.removeEventListener('blur', endDrag);
+            
+            updateWindowShape();
+            
+            ipcRenderer.send(CHANNELS.DRAG_END, { id, x: widget.bounds.x, y: widget.bounds.y });
+        };
+
+        currentDragListeners = { onMouseMove, endDrag };
+        
+        showDragOverlay();
+
+        dragOverlay.addEventListener('mousemove', onMouseMove);
+        dragOverlay.addEventListener('mouseup', endDrag);
+        window.addEventListener('blur', endDrag);
+        
+        ipcRenderer.once('service.toplayer:stop-drag', endDrag);
+    }
 });
+
+function cleanupDragListeners(listeners) {
+    if (!listeners) return;
+    
+    dragOverlay.removeEventListener('click', listeners.onTargetClick);
+    dragOverlay.removeEventListener('touchend', listeners.onTargetClick);
+    dragOverlay.removeEventListener('mousemove', listeners.onMouseMove);
+    dragOverlay.removeEventListener('mouseup', listeners.endDrag);
+    window.removeEventListener('blur', listeners.endDrag);
+    
+    // Remove touch hint if exists
+    const hint = document.getElementById('touch-drag-hint');
+    if (hint) hint.remove();
+}
 
 // Overlay control IPC
 ipcRenderer.on(CHANNELS.SHOW_OVERLAY, (_, hint) => showDragOverlay(hint));
 ipcRenderer.on(CHANNELS.HIDE_OVERLAY, () => hideDragOverlay());
+
+// Handle heartbeat from main process - respond immediately
+ipcRenderer.on('service.toplayer:heartbeat', () => {
+    ipcRenderer.send('service.toplayer:heartbeat-response');
+});
 
 // Notify main process that renderer is ready
 ipcRenderer.send('service.toplayer:renderer-ready');

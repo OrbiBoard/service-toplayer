@@ -1,4 +1,4 @@
-const { BrowserWindow, screen, ipcMain } = require('electron');
+const { BrowserWindow, screen, ipcMain, app } = require('electron');
 const path = require('path');
 
 // Global reference to prevent garbage collection
@@ -7,6 +7,11 @@ const widgets = new Map();
 let isRendererReady = false;
 const pendingWidgets = [];
 let isDragging = false;
+let topMostInterval = null;
+let boundsCheckInterval = null;
+let heartbeatInterval = null;
+let lastHeartbeat = Date.now();
+let missedHeartbeats = 0;
 
 // IPC Channels
 const CHANNELS = {
@@ -17,12 +22,10 @@ const CHANNELS = {
     START_DRAG: 'service.toplayer:start-drag',
     DRAG_END: 'service.toplayer:drag-end',
     SHOW_OVERLAY: 'service.toplayer:show-overlay',
-    HIDE_OVERLAY: 'service.toplayer:hide-overlay'
+    HIDE_OVERLAY: 'service.toplayer:hide-overlay',
+    HEARTBEAT: 'service.toplayer:heartbeat',
+    HEARTBEAT_RESPONSE: 'service.toplayer:heartbeat-response'
 };
-
-// Fix channel names to match renderer (using hyphen instead of dot for consistency if needed, but keeping dot for compatibility with existing calls)
-// Actually, let's make sure they match exactly what's in renderer.js
-// renderer.js uses 'service.toplayer:...' so we are good.
 
 let pluginApi = null;
 
@@ -52,8 +55,6 @@ const onSetShape = (event, payload) => {
     }
 
     if (passThroughMode) {
-        // Special mode: Set shape so Chromium gets Move events, 
-        // BUT tell OS to forward clicks (ignoreMouse=true).
         try {
             overlayWindow.setShape(rects);
             overlayWindow.setIgnoreMouseEvents(true, { forward: true });
@@ -61,14 +62,10 @@ const onSetShape = (event, payload) => {
             console.error('[Service.TopLayer] Failed to set pass-through shape', e);
         }
     } else {
-        // Standard mode
         if (!Array.isArray(rects) || rects.length === 0) {
-            // No widgets -> full transparency
             overlayWindow.setIgnoreMouseEvents(true, { forward: true });
-            // Clear shape? Or set to empty?
             try { overlayWindow.setShape([]); } catch(e) {}
         } else {
-            // Widgets present -> Capture mouse in those areas
             try {
                 overlayWindow.setShape(rects);
                 overlayWindow.setIgnoreMouseEvents(false);
@@ -79,49 +76,128 @@ const onSetShape = (event, payload) => {
     }
 };
 
+/**
+ * Ensure window stays on top - call periodically
+ */
+function ensureTopMost() {
+    if (!overlayWindow || overlayWindow.isDestroyed()) return;
+    
+    try {
+        // Force re-apply always on top - this helps when another fullscreen window takes over
+        // Toggle off then on to force OS to recognize the top-most state
+        overlayWindow.setAlwaysOnTop(false);
+        overlayWindow.setAlwaysOnTop(true, 'screen-saver');
+        
+        // Use moveTop to bring window to front
+        try {
+            overlayWindow.moveTop();
+        } catch (e) {}
+        
+        // Ensure window is visible
+        if (!overlayWindow.isVisible()) {
+            overlayWindow.show();
+        }
+        
+        // On Windows, sometimes need to re-set bounds to ensure coverage
+        if (process.platform === 'win32') {
+            const displays = screen.getAllDisplays();
+            // Check if window covers all displays
+            const winBounds = overlayWindow.getBounds();
+            let needsResize = false;
+            
+            for (const display of displays) {
+                const db = display.bounds;
+                if (db.x < winBounds.x || db.y < winBounds.y ||
+                    db.x + db.width > winBounds.x + winBounds.width ||
+                    db.y + db.height > winBounds.y + winBounds.height) {
+                    needsResize = true;
+                    break;
+                }
+            }
+            
+            if (needsResize) {
+                // Calculate union of all display bounds
+                let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+                for (const display of displays) {
+                    const db = display.bounds;
+                    minX = Math.min(minX, db.x);
+                    minY = Math.min(minY, db.y);
+                    maxX = Math.max(maxX, db.x + db.width);
+                    maxY = Math.max(maxY, db.y + db.height);
+                }
+                overlayWindow.setBounds({ x: minX, y: minY, width: maxX - minX, height: maxY - minY });
+            }
+        }
+    } catch (e) {
+        console.error('[Service.TopLayer] Error in ensureTopMost:', e);
+    }
+}
+
+/**
+ * Calculate bounds that cover all displays
+ */
+function getCombinedDisplayBounds() {
+    const displays = screen.getAllDisplays();
+    if (displays.length === 0) {
+        return screen.getPrimaryDisplay().bounds;
+    }
+    
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const display of displays) {
+        const db = display.bounds;
+        minX = Math.min(minX, db.x);
+        minY = Math.min(minY, db.y);
+        maxX = Math.max(maxX, db.x + db.width);
+        maxY = Math.max(maxY, db.y + db.height);
+    }
+    
+    return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+
 function createWindow() {
     isRendererReady = false;
-    pendingWidgets.length = 0; // Clear pending on new window? Or keep them?
-    // If window crashed, we might want to restore widgets.
-    // So let's repopulate pendingWidgets from widgets map!
     
     // Repopulate pending from existing widgets map
+    pendingWidgets.length = 0;
     for (const [id, opts] of widgets) {
         pendingWidgets.push(opts);
     }
     
-    const primaryDisplay = screen.getPrimaryDisplay();
-    // Use bounds instead of workArea to cover full screen (including taskbar)
-    // Actually, workArea excludes taskbar, bounds includes it.
-    // If we want FULL screen overlay, use bounds.
-    // But be careful not to block taskbar interaction unless intended.
-    // Usually overlays want to be full screen.
-    const { x, y, width, height } = primaryDisplay.bounds;
+    // Get combined bounds of all displays
+    const bounds = getCombinedDisplayBounds();
+    const { x, y, width, height } = bounds;
 
     overlayWindow = new BrowserWindow({
         x, y, width, height,
-        type: 'toolbar',        // Helps with staying on top on some OS
-        frame: false,           // No window chrome
-        transparent: true,      // Transparent background
+        type: 'toolbar',
+        frame: false,
+        transparent: true,
         resizable: false,
         movable: false,
         alwaysOnTop: true,
-        skipTaskbar: true,      // Don't show in taskbar
+        skipTaskbar: true,
         hasShadow: false,
-        focusable: false,       // Don't steal focus
+        focusable: true,
         webPreferences: {
             nodeIntegration: true,
-            contextIsolation: false, // Allowed for trusted internal service
+            contextIsolation: false,
             webSecurity: false,
             webviewTag: true,
-            backgroundThrottling: false // Keep running when hidden
+            backgroundThrottling: false
         }
     });
 
-    // Ensure it stays on top of everything including screensavers/lock screens if possible
+    // Set highest always-on-top level
     overlayWindow.setAlwaysOnTop(true, 'screen-saver');
     
-    // Explicitly set size to ensure full screen coverage even if DPI scaling is weird
+    // On macOS, make visible on all workspaces
+    if (process.platform === 'darwin') {
+        try {
+            overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+        } catch (e) {}
+    }
+    
+    // Explicitly set bounds
     overlayWindow.setBounds({ x, y, width, height });
 
     // Initial state: click-through
@@ -129,16 +205,166 @@ function createWindow() {
 
     overlayWindow.loadFile(path.join(__dirname, 'index.html'));
 
+    // Handle window being hidden or minimized - restore it
+    overlayWindow.on('hide', () => {
+        if (overlayWindow && !overlayWindow.isDestroyed()) {
+            setTimeout(() => {
+                try {
+                    if (overlayWindow && !overlayWindow.isDestroyed()) {
+                        overlayWindow.show();
+                    }
+                } catch (e) {}
+            }, 100);
+        }
+    });
+    
+    overlayWindow.on('minimize', () => {
+        if (overlayWindow && !overlayWindow.isDestroyed()) {
+            try {
+                overlayWindow.restore();
+            } catch (e) {}
+        }
+    });
+
     overlayWindow.on('closed', () => {
         overlayWindow = null;
         widgets.clear();
         isRendererReady = false;
         pendingWidgets.length = 0;
     });
+    
+    // Start periodic top-most check
+    startTopMostCheck();
+    
+    // Start heartbeat detection
+    startHeartbeat();
+}
+
+/**
+ * Start periodic checks to ensure window stays on top
+ */
+function startTopMostCheck() {
+    // Clear existing intervals
+    if (topMostInterval) {
+        clearInterval(topMostInterval);
+    }
+    if (boundsCheckInterval) {
+        clearInterval(boundsCheckInterval);
+    }
+    
+    // Check every 2 seconds
+    topMostInterval = setInterval(ensureTopMost, 2000);
+    
+    // Check bounds every 5 seconds (for display changes)
+    boundsCheckInterval = setInterval(() => {
+        if (!overlayWindow || overlayWindow.isDestroyed()) return;
+        
+        const currentBounds = overlayWindow.getBounds();
+        const targetBounds = getCombinedDisplayBounds();
+        
+        // If bounds don't match, update
+        if (currentBounds.x !== targetBounds.x ||
+            currentBounds.y !== targetBounds.y ||
+            currentBounds.width !== targetBounds.width ||
+            currentBounds.height !== targetBounds.height) {
+            console.log('[Service.TopLayer] Display bounds changed, updating window');
+            overlayWindow.setBounds(targetBounds);
+        }
+    }, 5000);
+}
+
+/**
+ * Stop periodic checks
+ */
+function stopTopMostCheck() {
+    if (topMostInterval) {
+        clearInterval(topMostInterval);
+        topMostInterval = null;
+    }
+    if (boundsCheckInterval) {
+        clearInterval(boundsCheckInterval);
+        boundsCheckInterval = null;
+    }
+    if (heartbeatInterval) {
+        clearInterval(heartbeatInterval);
+        heartbeatInterval = null;
+    }
+}
+
+/**
+ * Start heartbeat to detect frozen renderer
+ */
+function startHeartbeat() {
+    if (heartbeatInterval) {
+        clearInterval(heartbeatInterval);
+    }
+    
+    missedHeartbeats = 0;
+    lastHeartbeat = Date.now();
+    
+    // Send heartbeat every 3 seconds, expect response within 5 seconds
+    heartbeatInterval = setInterval(() => {
+        if (!overlayWindow || overlayWindow.isDestroyed()) {
+            return;
+        }
+        
+        // Check if we missed too many heartbeats
+        const now = Date.now();
+        if (now - lastHeartbeat > 10000) {
+            missedHeartbeats++;
+            console.warn(`[Service.TopLayer] Missed heartbeat (${missedHeartbeats})`);
+            
+            if (missedHeartbeats >= 3) {
+                console.error('[Service.TopLayer] Renderer appears frozen, recreating window');
+                missedHeartbeats = 0;
+                
+                // Destroy and recreate window
+                try {
+                    if (overlayWindow && !overlayWindow.isDestroyed()) {
+                        overlayWindow.destroy();
+                    }
+                } catch (e) {}
+                overlayWindow = null;
+                isRendererReady = false;
+                createWindow();
+                return;
+            }
+        }
+        
+        // Send heartbeat ping
+        try {
+            overlayWindow.webContents.send(CHANNELS.HEARTBEAT);
+        } catch (e) {
+            console.error('[Service.TopLayer] Failed to send heartbeat:', e);
+        }
+    }, 3000);
+}
+
+/**
+ * Handle heartbeat response from renderer
+ */
+function handleHeartbeatResponse() {
+    lastHeartbeat = Date.now();
+    missedHeartbeats = 0;
 }
 
 // Public API Functions
 const functions = {
+    // Force bring to front - call when needed
+    forceToFront: () => {
+        if (!overlayWindow || overlayWindow.isDestroyed()) return false;
+        try {
+            overlayWindow.setAlwaysOnTop(false);
+            overlayWindow.setAlwaysOnTop(true, 'screen-saver');
+            overlayWindow.moveTop();
+            overlayWindow.show();
+            return true;
+        } catch (e) {
+            console.error('[Service.TopLayer] forceToFront failed:', e);
+            return false;
+        }
+    },
+    
     addWidget: (options) => {
         // Fix: Ensure we have an ID before anything else
         if (!options || !options.id) {
@@ -200,9 +426,8 @@ const functions = {
 
         if (!overlayWindow || !widgets.has(id)) return false;
         
-        console.log('[Service.TopLayer] startDrag called for:', id);
+        console.log('[Service.TopLayer] startDrag called for:', id, 'isTouch:', options.isTouch);
         isDragging = true;
-        console.log('[Service.TopLayer] isDragging set to true');
         
         try {
             console.log('[Service.TopLayer] Setting full screen shape');
@@ -212,6 +437,13 @@ const functions = {
         } catch (e) {
             console.error('[Service.TopLayer] Failed to set drag shape', e);
         }
+        
+        // Notify renderer to start listening for drag events
+        // Pass isTouch to determine drag mode
+        overlayWindow.webContents.send(CHANNELS.START_DRAG, { 
+            id,
+            isTouch: options.isTouch || false
+        });
         
         return true;
     },
@@ -455,6 +687,36 @@ function init(api) {
         }
     });
 
+    // Handle heartbeat response from renderer
+    ipcMain.on(CHANNELS.HEARTBEAT_RESPONSE, () => {
+        handleHeartbeatResponse();
+    });
+
+    // Handle display changes
+    screen.on('display-added', () => {
+        console.log('[Service.TopLayer] Display added, updating bounds');
+        if (overlayWindow && !overlayWindow.isDestroyed()) {
+            const bounds = getCombinedDisplayBounds();
+            overlayWindow.setBounds(bounds);
+        }
+    });
+    
+    screen.on('display-removed', () => {
+        console.log('[Service.TopLayer] Display removed, updating bounds');
+        if (overlayWindow && !overlayWindow.isDestroyed()) {
+            const bounds = getCombinedDisplayBounds();
+            overlayWindow.setBounds(bounds);
+        }
+    });
+    
+    screen.on('display-metrics-changed', () => {
+        console.log('[Service.TopLayer] Display metrics changed, updating bounds');
+        if (overlayWindow && !overlayWindow.isDestroyed()) {
+            const bounds = getCombinedDisplayBounds();
+            overlayWindow.setBounds(bounds);
+        }
+    });
+
     if (!overlayWindow) {
         createWindow();
     }
@@ -466,7 +728,16 @@ function init(api) {
 
 // Optional: Called when plugin is disabled/unloaded
 function unload() {
+    stopTopMostCheck();
     ipcMain.removeListener(CHANNELS.SET_SHAPE, onSetShape);
+    
+    // Remove display change listeners
+    try {
+        screen.removeAllListeners('display-added');
+        screen.removeAllListeners('display-removed');
+        screen.removeAllListeners('display-metrics-changed');
+    } catch (e) {}
+    
     if (overlayWindow) {
         overlayWindow.destroy();
         overlayWindow = null;
@@ -476,7 +747,7 @@ function unload() {
 
 module.exports = {
     init,
-    unload, // OrbiBoard might use 'unload' or 'disabled'
-    disabled: unload, // Alias for compatibility
+    unload,
+    disabled: unload,
     functions
 };
