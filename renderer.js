@@ -238,15 +238,27 @@ ipcRenderer.on(CHANNELS.START_DRAG, (_, payload) => {
     const widgetHeight = widget.bounds.height;
 
     const clampToBounds = (newX, newY) => {
-        const minX = 0;
-        const minY = 0;
-        const maxX = window.innerWidth - widgetWidth;
-        const maxY = window.innerHeight - widgetHeight;
+        const winWidth = window.innerWidth;
+        const winHeight = window.innerHeight;
         
-        return {
-            x: Math.max(minX, Math.min(maxX, newX)),
-            y: Math.max(minY, Math.min(maxY, newY))
-        };
+        // Ensure widget dimensions are valid
+        const w = Math.max(1, widgetWidth);
+        const h = Math.max(1, widgetHeight);
+        
+        // If widget is larger than window, center it
+        if (w >= winWidth) {
+            newX = Math.round((winWidth - w) / 2);
+        } else {
+            newX = Math.max(0, Math.min(winWidth - w, newX));
+        }
+        
+        if (h >= winHeight) {
+            newY = Math.round((winHeight - h) / 2);
+        } else {
+            newY = Math.max(0, Math.min(winHeight - h, newY));
+        }
+        
+        return { x: Math.round(newX), y: Math.round(newY) };
     };
 
     // Show hint near widget for touch mode
